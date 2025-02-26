@@ -143,7 +143,62 @@ Enable debug logs in the scripts:
 ```bash
 set -x  # Enables verbose logging
 ```
+## Analysis Script (`analysis.py`)
+---
+### Python Libraries
+Install the Python dependencies using `conda`:
 
+```bash
+conda create -n protein_design_env python=3.9
+conda activate protein_design_env
+
+# Core Libraries
+conda install numpy pandas biopython scipy scikit-learn
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+
+# RMSD & Structural Analysis
+conda install -c conda-forge mdanalysis
+conda install -c conda-forge mdtraj  # Optional but useful
+
+# Plotting and PDF Generation
+conda install -c plotly plotly
+conda install -c conda-forge reportlab
+
+# Others
+conda install -c conda-forge argparse
+```
+
+---
+
+### Features
+- **pLDDT Extraction**: Reads scores from `ranking_debug.json`.
+- **RMSD Calculation**: Compares predictions to reference structures.
+- **pTM/ipTM & PAE Extraction**: Gathers AlphaFold metrics.
+- **Clash Count**: Calculates steric clashes.
+- **Top 20 Selection**: Based on pLDDT scores.
+
+### Outputs
+- **TSV Files**: Containing individual metrics for **pLDDT**, **RMSD**, **pTM/ipTM**, **PAE**, and **Clashes**.
+- **Final Merged TSV**: Combines all metrics for comprehensive analysis.
+- **Top 20 Folder**: Contains the top 20 PDB files ranked by pLDDT.
+- **PDF Report**: Includes scatter plots and summary tables.
+
+Run `analysis.py`-- make sure to specify file pathways in your bash: 
+
+```bash
+python analysis.py \
+  --rf_base_dir /path/to/reference_pdbs \
+  --af_base_dir /path/to/alphafold_outputs \
+  --output_dir /path/to/results/ \
+  --plddt_tsv plddt_results.tsv \
+  --rmsd_tsv rmsd_results.tsv \
+  --ptm_iptm_tsv ptm_iptm_results.tsv \
+  --pae_tsv pae_results.tsv \
+  --clash_tsv clash_results.tsv \
+  --final_merged_tsv final_merged_metrics.tsv \
+  --downselected_dir top20_by_plddt \
+  --pdf_name analysis_report.pdf
+```
 ---
 
 ## Example Applications
