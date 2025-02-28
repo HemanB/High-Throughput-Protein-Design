@@ -104,12 +104,6 @@ def iterative_rmsd_pymol(model_coords, ref_coords, max_iter=7, cutoff=2.0):
 
 def chain_rmsd_single_pair(ref_pdb, mod_pdb, chain_ref_id, chain_mod_id,
                            aligned_ref_seq, aligned_mod_seq, cutoff=2.0):
-    """
-    1) Load both PDBs with MDAnalysis
-    2) Select chain_ref_id in reference, chain_mod_id in model
-    3) Based on alignment strings (including gaps), gather matched backbone coords
-    4) Do iterative RMSD, return (chain_rms, used_indices)
-    """
     try:
         ref_u = mda.Universe(ref_pdb)
         mod_u = mda.Universe(mod_pdb)
