@@ -14,6 +14,8 @@ import math
 import MDAnalysis as mda
 from MDAnalysis.analysis.rms import rmsd
 from Bio.PDB import PDBParser
+from Bio import pairwise2 
+from Bio.SeqUtils import seq1
 from scipy.spatial import cKDTree
 from scipy.optimize import linear_sum_assignment
 
@@ -28,164 +30,208 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 
 ###############################################################################
-# Helper: Kabsch Algorithm
+# 1) Chain-based Sequence Extraction
+###############################################################################
+def get_chain_sequences(pdb_path):
+    parser = PDBParser(QUIET=True)
+    chain_dict = {}
+    try:
+        structure = parser.get_structure("temp", pdb_path)
+    except Exception as e:
+        print(f"[get_chain_sequences] Error parsing {pdb_path}: {e}")
+        return {}
+
+    for model in structure:
+        for chain in model:
+            cid = chain.id.strip()
+            if cid in chain_dict:
+                continue
+            seq_list = []
+            for residue in chain:
+                if not hasattr(residue, "resname"):
+                    continue
+                res3 = residue.resname.upper().strip()
+                try:
+                    one_letter = seq1(res3)  # standard AA -> 1-letter
+                except:
+                    one_letter = "X"
+                seq_list.append(one_letter)
+            chain_dict[cid] = "".join(seq_list)
+        break  # only first model
+    return chain_dict
+
+###############################################################################
+# 2) Kabsch
 ###############################################################################
 def kabsch(P, Q):
-    # Center the coordinates
-    P_cent = P - np.mean(P, axis=0)
-    Q_cent = Q - np.mean(Q, axis=0)
-    H = np.dot(P_cent.T, Q_cent)
-    U, S, Vt = np.linalg.svd(H)
-    d = np.linalg.det(np.dot(Vt.T, U.T))
-    D = np.diag([1, 1, d])
-    R = np.dot(Vt.T, np.dot(D, U.T))
-    t = np.mean(Q, axis=0) - np.dot(np.mean(P, axis=0), R)
+    P_cent = P - P.mean(axis=0)
+    Q_cent = Q - Q.mean(axis=0)
+    H = P_cent.T @ Q_cent
+    U, s, Vt = np.linalg.svd(H)
+    d = np.linalg.det(Vt.T @ U.T)
+    D = np.diag([1,1,d])
+    R = Vt.T @ D @ U.T
+    t = Q.mean(axis=0) - P.mean(axis=0) @ R
     return R, t
 
 ###############################################################################
-# Helper: Iterative RMSD with outlier rejection (mimicking PyMOL align)
+# 3) PyMOL-like iterative rejection
 ###############################################################################
-def iterative_rmsd(model_coords, ref_coords, tol=0.1, max_iter=5):
+def iterative_rmsd_pymol(model_coords, ref_coords, max_iter=7, cutoff=2.0):
 
-    # Start with all indices
-    indices = np.arange(model_coords.shape[0])
-    prev_rmsd = np.inf
+    if model_coords.shape[0] < 2:
+        return np.nan, []
 
-    for iteration in range(max_iter):
-        # Compute optimal rotation & translation on current set
-        R, t = kabsch(model_coords[indices], ref_coords[indices])
-        # Apply transformation
-        model_aligned = (model_coords[indices] - np.mean(model_coords[indices], axis=0)) @ R + np.mean(ref_coords[indices], axis=0)
-        # Compute per-atom distances after alignment
-        distances = np.linalg.norm(model_aligned - ref_coords[indices], axis=1)
-        current_rmsd = np.sqrt(np.mean(distances**2))
-        
-        cutoff = np.mean(distances) + np.std(distances)
-        new_indices = indices[distances <= cutoff]
-        # If no change or RMSD converged, break
-        if len(new_indices) == len(indices) or abs(prev_rmsd - current_rmsd) < tol:
-            indices = new_indices
+    indices = np.arange(len(model_coords))
+    for _ in range(max_iter):
+        if len(indices) < 2:
             break
-        prev_rmsd = current_rmsd
+        R, t = kabsch(model_coords[indices], ref_coords[indices])
+        model_sub = model_coords[indices] - model_coords[indices].mean(axis=0)
+        model_aligned = model_sub @ R + ref_coords[indices].mean(axis=0)
+        dist = np.linalg.norm(model_aligned - ref_coords[indices], axis=1)
+        current_rms = np.sqrt((dist**2).mean())
+        # remove outliers > cutoff*current_rms
+        new_indices = indices[dist <= (cutoff * current_rms)]
+        if np.array_equal(new_indices, indices):
+            break
         indices = new_indices
 
-    final_rmsd = rmsd(model_coords[indices], ref_coords[indices], center=True, superposition=True)
-    return final_rmsd, indices
+    if len(indices)<2:
+        return np.nan, []
+    final_r = rmsd(model_coords[indices], ref_coords[indices], center=True, superposition=True)
+    return final_r, indices
 
-###############################################################################
-# 1) Chain-based RMSD 
-###############################################################################
-def calculate_rmsd_multimer_robust(ref_pdb, model_pdb, exclude_chains=None):
-
-    if exclude_chains is None:
-        exclude_chains = []
-
-    # Load into MDAnalysis
+def chain_rmsd_single_pair(ref_pdb, mod_pdb, chain_ref_id, chain_mod_id,
+                           aligned_ref_seq, aligned_mod_seq, cutoff=2.0):
+    """
+    1) Load both PDBs with MDAnalysis
+    2) Select chain_ref_id in reference, chain_mod_id in model
+    3) Based on alignment strings (including gaps), gather matched backbone coords
+    4) Do iterative RMSD, return (chain_rms, used_indices)
+    """
     try:
         ref_u = mda.Universe(ref_pdb)
-        model_u = mda.Universe(model_pdb)
+        mod_u = mda.Universe(mod_pdb)
     except Exception as e:
-        print(f"[calculate_rmsd_multimer_robust] Error loading PDB files: {e}")
+        print(f"[chain_rmsd_single_pair] Error loading: {e}")
+        return np.nan, []
+
+    sel_ref = ref_u.select_atoms(f"segid {chain_ref_id} and protein")
+    sel_mod = mod_u.select_atoms(f"segid {chain_mod_id} and protein")
+    if (len(sel_ref)<1) or (len(sel_mod)<1):
+        return np.nan, []
+
+    ref_res = sel_ref.residues
+    mod_res = sel_mod.residues
+
+    ref_coords_list = []
+    mod_coords_list = []
+
+    pos_r = 0
+    pos_m = 0
+    for i in range(len(aligned_ref_seq)):
+        r_aa = aligned_ref_seq[i]
+        m_aa = aligned_mod_seq[i]
+        if (r_aa != "-") and (m_aa != "-"):
+            if (pos_r < len(ref_res)) and (pos_m < len(mod_res)):
+                rr = ref_res[pos_r]
+                mr = mod_res[pos_m]
+                # gather backbone
+                for nm in ["N","CA","C","O"]:
+                    a1 = rr.atoms.select_atoms(f"name {nm}")
+                    a2 = mr.atoms.select_atoms(f"name {nm}")
+                    if (len(a1)==1) and (len(a2)==1):
+                        ref_coords_list.append(a1.positions[0])
+                        mod_coords_list.append(a2.positions[0])
+        if r_aa != "-":
+            pos_r+=1
+        if m_aa != "-":
+            pos_m+=1
+
+    if len(ref_coords_list)<2:
+        return np.nan, []
+    ref_coords = np.array(ref_coords_list)
+    mod_coords = np.array(mod_coords_list)
+
+    chain_r, used_ix = iterative_rmsd_pymol(mod_coords, ref_coords, max_iter=5, cutoff=cutoff)
+    return chain_r, used_ix
+
+###############################################################################
+# 5)  RMSD multimer run
+###############################################################################
+def calculate_rmsd_multimer_robust(ref_pdb, model_pdb, exclude_chains=None):
+    if exclude_chains is None:
+        exclude_chains=[]
+
+    # 1) chain sequences
+    ref_chains = get_chain_sequences(ref_pdb)
+    mod_chains = get_chain_sequences(model_pdb)
+    if not ref_chains or not mod_chains:
         return "N/A"
 
-    # Helper to map (resindex, atom_name) -> atom_index for backbone atoms
-    def get_mapping(atoms):
-        mapping = {}
-        for r in atoms.residues:
-            for a in r.atoms:
-                if a.name in ["N", "CA", "C", "O"]:
-                    mapping[(r.resindex, a.name)] = a.index
-        return mapping
-        
-   
-    ref_segs = [seg for seg in ref_u.segments if seg.segid.strip() not in exclude_chains]
-    model_segs = [seg for seg in model_u.segments if seg.segid.strip() not in exclude_chains]
+    ref_chain_ids = sorted(ref_chains.keys())
+    mod_chain_ids = sorted(mod_chains.keys())
+    if (len(ref_chain_ids)==0) or (len(mod_chain_ids)==0):
+        return "N/A"
 
-    if not ref_segs or not model_segs:
-        print("[calculate_rmsd_multimer_robust] No valid chains. Falling back.")
-        return _fallback_rmsd(ref_u, model_u)
+    # 2) cost matrix from -alignment_score
+    n_ref = len(ref_chain_ids)
+    n_mod = len(mod_chain_ids)
+    cost_matrix = np.full((n_ref,n_mod),1e6,dtype=float)
 
-    n_ref = len(ref_segs)
-    n_model = len(model_segs)
-
-    cost_matrix = np.full((n_ref, n_model), 1e6)
-    rmsd_matrix = [[None]*n_model for _ in range(n_ref)]
-
-    for i, ref_seg in enumerate(ref_segs):
-        ref_chain_id = ref_seg.segid.strip()
-        ref_atoms = ref_u.select_atoms(f"segid {ref_chain_id} and backbone")
-        if len(ref_atoms) == 0:
-            continue
-        ref_map = get_mapping(ref_atoms)
-
-        for j, model_seg in enumerate(model_segs):
-            model_chain_id = model_seg.segid.strip()
-            model_atoms = model_u.select_atoms(f"segid {model_chain_id} and backbone")
-            if len(model_atoms) == 0:
-                continue
-            model_map = get_mapping(model_atoms)
-
-            # Find common (resindex, atom_name)
-            common_keys = sorted(set(ref_map.keys()) & set(model_map.keys()))
-            if not common_keys:
-                continue
-
-            ref_indices = [ref_map[k] for k in common_keys]
-            model_indices = [model_map[k] for k in common_keys]
-
-            ref_coords = ref_u.atoms[ref_indices].positions
-            model_coords = model_u.atoms[model_indices].positions
-
-            try:
-                chain_rmsd_val, _ = iterative_rmsd(model_coords, ref_coords, tol=0.1, max_iter=5)
-                cost_matrix[i, j] = chain_rmsd_val
-                rmsd_matrix[i][j] = chain_rmsd_val
-            except Exception as e:
-                print(f"Error computing RMSD for chain {ref_chain_id} vs {model_chain_id}: {e}")
-                continue
+    for i,rc in enumerate(ref_chain_ids):
+        seq_r = ref_chains[rc]
+        for j,mc in enumerate(mod_chain_ids):
+            seq_m = mod_chains[mc]
+            if seq_r and seq_m:
+                alns = pairwise2.align.globalxx(seq_r, seq_m)
+                if alns:
+                    score = alns[0][2]
+                    cost_matrix[i,j] = -score
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    chain_comps = []
+    total_atoms = 0
+    sum_rms_atoms = 0.0
 
-    chain_matches = []
-    assigned_rmsds = []
-    for (i, j) in zip(row_ind, col_ind):
-        if cost_matrix[i, j] < 1e6:
-            r_id = ref_segs[i].segid.strip()
-            m_id = model_segs[j].segid.strip()
-            chain_rms = rmsd_matrix[i][j]
-            chain_matches.append((r_id, m_id, chain_rms))
-            assigned_rmsds.append(chain_rms)
+    for idx in range(len(row_ind)):
+        i = row_ind[idx]
+        j = col_ind[idx]
+        if cost_matrix[i,j]>=1e6:
+            continue
+        rc = ref_chain_ids[i]
+        mc = mod_chain_ids[j]
 
-    if assigned_rmsds:
-        avg_rmsd = float(np.mean(assigned_rmsds))
-        return {
-            "chain_comparisons": chain_matches,
-            "average_rmsd": avg_rmsd
-        }
-    else:
-	return _fallback_rmsd(ref_u, model_u)
+        seq_r = ref_chains[rc]
+        seq_m = mod_chains[mc]
+        alns2 = pairwise2.align.globalxx(seq_r, seq_m)
+        if not alns2:
+            continue
+        best = alns2[0]
+        aref = best[0]
+        amod = best[1]
 
-def _fallback_rmsd(ref_u, model_u):
-    """
-    Fallback single-backbone RMSD (global).
-    Returns {"fallback_rmsd": float} or "N/A".
-    """
-    try:
-        ref_bb = ref_u.select_atoms("backbone")
-        model_bb = model_u.select_atoms("backbone")
-        if len(ref_bb) == 0 or len(model_bb) == 0:
-            return "N/A"
-        if len(ref_bb) == len(model_bb):
-            val = rmsd(model_bb.positions, ref_bb.positions, center=True, superposition=True)
-            return {"fallback_rmsd": val}
-        else:
-            n = min(len(ref_bb), len(model_bb))
-            val = rmsd(model_bb.positions[:n], ref_bb.positions[:n],
-                       center=True, superposition=True)
-            return {"fallback_rmsd": val}
-    except Exception as e:
-        print(f"[fallback_rmsd] Error: {e}")
+        # 4) chain-level RMSD
+        c_r, used_ix = chain_rmsd_single_pair(ref_pdb, model_pdb, rc, mc, aref, amod, cutoff=2.0)
+        if (c_r is np.nan) or math.isnan(c_r):
+            continue
+
+        n_used = len(used_ix)
+        # store e.g. "2.30(1256atoms)"
+        c_str = f"{c_r:.2f}({n_used}atoms)"
+        chain_comps.append((rc, mc, c_str))
+
+        total_atoms += n_used
+        sum_rms_atoms += (c_r * n_used)
+
+    if total_atoms<1:
         return "N/A"
+    overall_rms = sum_rms_atoms / total_atoms
+    return {
+        "chain_comparisons": chain_comps,
+        "average_rmsd": overall_rms
+    }
 
 ###############################################################################
 # 2) pLDDT Extraction
@@ -303,6 +349,7 @@ def calculate_clash_score(pdb_filepath, distance_threshold=2.0):
 
     total_clashes = 0
     for i, j in pairs:
+        # If they belong to the same residue index, skip
         if residues[i][1] == residues[j][1]:
             continue
         total_clashes += 1
@@ -383,8 +430,10 @@ def run_pipeline(args):
                         if "chain_comparisons" in rmsd_val:
                             avg_val = rmsd_val["average_rmsd"]
                             details = []
-                            for (rc, mc, val) in rmsd_val["chain_comparisons"]:
-                                details.append(f"{rc}->{mc}:{val:.3f}")
+                            for (rc, mc, val_str) in rmsd_val["chain_comparisons"]:
+                                # e.g. val_str = "2.30(1256atoms)"
+                                # we do "A->B:2.30(1256atoms)"
+                                details.append(f"{rc}->{mc}:{val_str}")
                             chain_details_str = "; ".join(details)
                             final_rmsd = avg_val
                         elif "fallback_rmsd" in rmsd_val:
@@ -515,7 +564,7 @@ def run_pipeline(args):
     print("\nPipeline completed!\n")
 
     return {
-	"af_base_dir": af_base_dir,
+	    "af_base_dir": af_base_dir,
         "output_dir": output_dir,
         "plddt_tsv": plddt_tsv,
         "rmsd_tsv": rmsd_tsv,
@@ -535,7 +584,6 @@ def run_report(config, pdf_name="analysis_report.pdf"):
       2) Scatter: pLDDT vs RMSD (All)
       3) Scatter: pLDDT vs RMSD (Top 20)
       4) Table of additional metrics (Clashes, PAE, pTM, ipTM)
-      5) BONUS: Table of chain-based RMSD details for the top 20
     """
     import sys
     import io
@@ -569,6 +617,7 @@ def run_report(config, pdf_name="analysis_report.pdf"):
     if plddt_df["pLDDT_Score"].max() <= 1.0:
         plddt_df["pLDDT_Score"] = plddt_df["pLDDT_Score"] * 100
 
+    # 2) Load RMSD
     try:
         rmsd_df = pd.read_csv(rmsd_file, sep="\t")
     except Exception as e:
@@ -589,25 +638,33 @@ def run_report(config, pdf_name="analysis_report.pdf"):
 
     rank_colors = {"0": "blue", "1": "green", "2": "orange", "3": "red", "4": "purple"}
 
+    # Scatter: All
     fig_all = px.scatter(
         merged,
         x="pLDDT_Score",
         y="RMSD",
         color=merged["Rank"].astype(str),
         color_discrete_map=rank_colors,
-        hover_data={"Name": True, "Model_Name": True, "pLDDT_Score":":.2f", "RMSD":":.2f","Chain_RMSD_Details":True},
+        hover_data={
+            "Name":True, "Model_Name":True,
+            "pLDDT_Score":":.2f","RMSD":":.2f","Chain_RMSD_Details":True
+        },
         title="pLDDT vs RMSD (All Predictions)",
         labels={"pLDDT_Score":"pLDDT","RMSD":"RMSD(Å)","color":"Rank"}
     )
     fig_all.update_layout(template="plotly_white")
 
+    # Scatter: Top 20
     fig_top20 = px.scatter(
         top_20,
         x="pLDDT_Score",
         y="RMSD",
         color=top_20["Rank"].astype(str),
         color_discrete_map=rank_colors,
-        hover_data={"Name": True, "Model_Name": True, "pLDDT_Score":":.2f", "RMSD":":.2f","Chain_RMSD_Details":True},
+        hover_data={
+            "Name":True, "Model_Name":True,
+            "pLDDT_Score":":.2f","RMSD":":.2f","Chain_RMSD_Details":True
+        },
         title="pLDDT vs RMSD (Top 20)",
         labels={"pLDDT_Score":"pLDDT","RMSD":"RMSD(Å)","color":"Rank"}
     )
@@ -620,6 +677,7 @@ def run_report(config, pdf_name="analysis_report.pdf"):
         print(f"Plotly figure conversion error: {e}")
         return
 
+    # Table data
     table_data_top20 = [["#","Name","Model_Name","pLDDT","RMSD"]]
     for i, row in top_20.iterrows():
         table_data_top20.append([
@@ -630,6 +688,7 @@ def run_report(config, pdf_name="analysis_report.pdf"):
             f"{row['RMSD']:.2f}"
         ])
 
+    # Additional metrics
     try:
         final_merged_df = pd.read_csv(final_merged_file, sep="\t")
     except Exception as e:
@@ -676,14 +735,14 @@ def run_report(config, pdf_name="analysis_report.pdf"):
 
     tbl_top20 = Table(table_data_top20, colWidths=[30,130,130,60,60])
     tbl_style_top20 = TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#4F81BD")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 12),
-        ("BOTTOMPADDING", (0,0), (-1,0), 8),
-        ("BACKGROUND", (0,1), (-1,-1), colors.HexColor("#D9E1F2")),
-        ("GRID", (0,0), (-1,-1), 1, colors.black),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#4F81BD")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.whitesmoke),
+        ("ALIGN",(0,0),(-1,-1),"CENTER"),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("FONTSIZE",(0,0),(-1,0),12),
+        ("BOTTOMPADDING",(0,0),(-1,0),8),
+        ("BACKGROUND",(0,1),(-1,-1),colors.HexColor("#D9E1F2")),
+        ("GRID",(0,0),(-1,-1),1,colors.black),
     ])
     tbl_top20.setStyle(tbl_style_top20)
     elements.append(tbl_top20)
@@ -714,8 +773,8 @@ def run_report(config, pdf_name="analysis_report.pdf"):
 
     tbl_metrics = Table(metric_table_data, colWidths=[130,130,60,60,60,60])
     style_metrics = TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#7030A0")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#7030A0")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.whitesmoke),
         ("ALIGN",(0,0),(-1,-1),"CENTER"),
         ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
         ("FONTSIZE",(0,0),(-1,0),12),
@@ -737,7 +796,7 @@ def run_report(config, pdf_name="analysis_report.pdf"):
 # 8) main()
 ###############################################################################
 def main():
-    parser = argparse.ArgumentParser(description="Full pipeline with chain-based RMSD and PDF report.")
+    parser = argparse.ArgumentParser(description="Full pipeline with chain-based RMSD (Hungarian + sequence) and PDF report.")
     parser.add_argument("--rf_base_dir", required=True, help="Path to reference PDBs")
     parser.add_argument("--af_base_dir", required=True, help="Path to AlphaFold output directories")
     parser.add_argument("--output_dir", required=True, help="Output directory for TSVs/PDF")
@@ -751,7 +810,6 @@ def main():
     parser.add_argument("--pdf_name", default="analysis_report.pdf", help="PDF filename")
 
     args = parser.parse_args()
-
     config = run_pipeline(args)
     run_report(config, pdf_name=args.pdf_name)
 
