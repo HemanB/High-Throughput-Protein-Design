@@ -1,0 +1,27 @@
+# Outputs
+outputs/
+*.out
+*.err
+slurm-*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Conda
+.conda/
+
+# Config (user-specific)
+config.json
+
+# Data
+*.pdb
+*.cif
+*.fa
+*.fasta
+
+# Large files
+ProteinMPNN/
+*.sif

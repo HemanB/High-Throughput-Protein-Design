@@ -1,0 +1,55 @@
+{
+  "pipeline": {
+    "base_dir": "/path/to/output/directory",
+    "input_pdb": "/path/to/your/target.pdb",
+    "conda_env": "protein_design",
+    "container_runtime": "singularity",
+    "cuda_module": "CUDA/12.4"
+  },
+  "slurm": {
+    "partition": "gpu-partition",
+    "gres": "gpu:1",
+    "mem": "64G",
+    "cpus_per_task": 8,
+    "time": "48:00:00",
+    "mail_user": "",
+    "mail_type": "END",
+    "exclusive": false,
+    "extra_sbatch_args": ""
+  },
+  "rfdiffusion": {
+    "container_path": "/path/to/rfdiffusion_v1.1.0.sif",
+    "model_path": "/path/to/RFdiffusion/models",
+    "internal_pwd": "/app/RFdiffusion",
+    "num_designs": 10,
+    "contigs": "[B1-100/0 50-100]",
+    "hotspots": "[B30,B50,B60]",
+    "extra_args": "",
+    "tmp_dir": "/tmp/rfd_tmp",
+    "cache_dir": "/tmp/rfd_cache"
+  },
+  "proteinmpnn": {
+    "install_path": "./ProteinMPNN",
+    "num_sequences": 15,
+    "backbone_noise": 0.1,
+    "sampling_temp": 0.15,
+    "seed": 37,
+    "batch_size": 1,
+    "designed_chain": "A",
+    "target_chain": "B",
+    "chains_to_design": "A B",
+    "process_count": 3
+  },
+  "alphafold3": {
+    "container_path": "/path/to/AF3_v3.0.1.sif",
+    "database_path": "/path/to/AF3_databases",
+    "model_path": "/path/to/AF3_models",
+    "programs_path": "/path/to/AF3_Programs/alphafold3",
+    "num_seeds": 5,
+    "num_samples": 5,
+    "use_templates": false,
+    "template_cif_dir": "",
+    "template_release_date": "2024-01-01",
+    "tmp_dir": "/tmp/af3_tmp"
+  }
+}

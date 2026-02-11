@@ -1,0 +1,24 @@
+name: protein_design
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+  - plotly
+  - schrodinger
+dependencies:
+  - python=3.10
+  - pytorch
+  - pytorch-cuda=12.4
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - biopython
+  - mdanalysis
+  - reportlab
+  - plotly
+  - kaleido
+  - pymol-open-source
+  - jq
+  - pip:
+    - plotly

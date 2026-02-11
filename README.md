@@ -1,224 +1,258 @@
-# A User-Friendly Computational Workflow for High-Throughput Protein Design: Integrating RFD, MPNN, and AlphaFold
+# High-Throughput Protein Design Pipeline
 
-## Abstract
-Designing de novo protein binders is a critical frontier in modern protein engineering, often requiring significant manual oversight. This pipeline integrates **RFdiffusion (RFD)**, **ProteinMPNN (MPNN)**, and **AlphaFold (AF)** into a streamlined framework to enable automated, high-throughput binder design. The workflow is adaptable, with tunable parameters and robust quality assessment tools for evaluating structural metrics like pLDDT and RMSD. This tool is versatile for applications such as designing Flu A20 binders, Vav1/GEFH1 inhibitors, and COVID-19 epitope scaffolds, addressing bottlenecks in the binder design process and scaling across diverse research needs.
+An automated pipeline for computational protein design integrating **RFDiffusion**, **ProteinMPNN**, and **AlphaFold 3**. Clone, configure, and run on any SLURM-managed HPC cluster.
 
----
+## Overview
 
-## Features
-- **Integrated Workflow**: Combines RFdiffusion, ProteinMPNN, and AlphaFold for seamless protein binder design.
-- **Customizability**: Supports tunable parameters for specific design goals.
-- **High-Throughput**: Automates iterative steps, enabling efficient processing of large datasets.
-- **Quality Metrics**: Includes structural evaluations like pLDDT and RMSD for binder selection.
+This pipeline automates the full protein design workflow:
 
----
+1. **RFDiffusion** — Generates diverse protein backbone structures conditioned on a target binding site
+2. **ProteinMPNN** — Designs amino acid sequences for each generated backbone
+3. **AF3 Input Generation** — Converts designed sequences to AlphaFold 3 input format
+4. **AlphaFold 3** — Predicts 3D structures of designed sequences and evaluates confidence
+
+All configuration is centralized in a single JSON file. No hardcoded paths.
+
+## Quick Start
+
+```bash
+# 1. Clone
+git clone https://github.com/HemanB/High-Throughput-Protein-Design.git
+cd High-Throughput-Protein-Design
+
+# 2. Setup (creates conda env, clones ProteinMPNN)
+./setup.sh
+
+# 3. Configure
+#    Edit config.json with your paths (container images, databases, output dirs)
+nano config.json
+
+# 4. Activate environment
+conda activate protein_design
+
+# 5. Run
+sbatch pipeline.sh config.json
+```
 
 ## Prerequisites
 
-### Software Requirements
-- **Linux OS**
-- **CUDA Toolkit** (v12.4 or compatible)
-- **Python** (v3.9+)
-- **Singularity** (for containerized environments)
-- **jq** (JSON parsing tool)
-- **AlphaFold Databases**: Ensure the required databases are downloaded and accessible.
+| Requirement | Details |
+|---|---|
+| **SLURM** | Job scheduler for HPC |
+| **GPU** | NVIDIA GPU with CUDA support |
+| **Singularity/Apptainer** | Container runtime (or Docker) |
+| **Conda** | Miniconda or Anaconda |
+| **RFDiffusion container** | `rfdiffusion_v1.1.0.sif` + model weights |
+| **AlphaFold 3 container** | `AF3_v3.0.1.sif` + databases + model parameters |
 
-### Python Dependencies
-Install dependencies via Conda:
+## Installation
+
+### Automated Setup
+
 ```bash
-conda create -n protein_design_env python=3.9
-conda activate protein_design_env
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-conda install scipy
-conda install scikit-learn
-conda install biopython
+./setup.sh                          # Full setup
+./setup.sh --skip-conda             # Skip conda env (already exists)
+./setup.sh --mpnn-path /path/to/ProteinMPNN  # Use existing install
 ```
 
----
+The setup script:
+- Creates a conda environment from `environment.yml`
+- Clones ProteinMPNN (or links to an existing installation)
+- Creates `config.json` from the template
+- Validates your environment (container runtime, GPU, jq)
 
-## Pipeline Structure
+### Manual Setup
 
-### Components
-1. **Input Preparation**: Specify the input PDB file and configuration settings in `config.json`.
-2. **RFdiffusion**:
-   - Generates initial binder designs.
-   - Uses specified contigs and hotspots for targeted designs.
-3. **ProteinMPNN**:
-   - Processes RFdiffusion outputs and generates diverse sequences.
-   - Allows customization of backbone noise and sampling parameters.
-4. **AlphaFold**:
-   - Validates structural integrity and stability of binders.
-   - Generates confidence metrics (e.g., pLDDT).
-
----
-
-## File Structure
-
-```plaintext
-pipeline/
-├── config.json       # Configuration file for the pipeline
-├── script.sh         # Main script to execute the pipeline
-├── RFdiffusion/           # RFdiffusion executable and models
-├── ProteinMPNN/           # ProteinMPNN scripts and helper functions
-├── AlphaFold/             # AlphaFold executables and databases
-├── helper_scripts/        # Auxiliary Python scripts (e.g., process_fasta.py)
-└── outputs/               # Outputs organized by timestamp and stage
-```
-
----
-
-## Usage
-
-### Step 1: Edit Configuration File
-Edit `config.json` to specify:
-- Base directory paths
-- Input PDB file path
-- RFdiffusion, MPNN, and AlphaFold parameters
-
-Example:
-```json
-{
-  "base_dir": "/path/to/working/directory",
-  "input_pdb": "/path/to/input.pdb",
-  "conda_env": "protein_design_env",
-  "rfdiffusion": {
-    "pwd": "/path/to/RFdiffusion",
-    "sif_path": "/path/to/rfdiffusion.sif",
-    "model_path": "/path/to/models",
-    "num_designs": 2,
-    "contigs": "[B192-416/0 B420-508/0 100-150]",
-    "hotspots": "[B212,B320,B327,B331]",
-    "tmp_dir": "/tmp",
-    "cache_dir": "/cache"
-  },
-  "proteinmpnn": {
-    "script_path": "/path/to/protein_mpnn_run.py",
-    "helper_scripts_path": "/path/to/helper_scripts/",
-    "num_sequences": 15,
-    "backbone_noise": 0.1,
-    "sampling_temp": 0.15,
-    "seed": 37,
-    "batch_size": 1,
-    "modified_chain": "A",
-    "constant_chain": "B",
-    "chains_to_design": "A B",
-    "process_count": 3
-  },
-  "alphafold": {
-    "pwd": "/path/to/alphafold",
-    "sif_path": "/path/to/alphafold_latest.sif",
-    "database_path": "/path/to/alphafold_dbs",
-    "model_preset": "multimer",
-    "gpu_relax": true,
-    "max_template_date": "2023-12-31"
-  }
-}
-```
-
-### Step 2: Run the Pipeline
-Submit the job using Slurm:
 ```bash
-sbatch script.sh config.json
+conda env create -f environment.yml
+conda activate protein_design
+git clone https://github.com/dauparas/ProteinMPNN.git
+cp config_template.json config.json
 ```
 
-### Step 3: Monitor Outputs
-- Outputs are organized by timestamp in the `base_dir` specified in `config.json`.
-- Key directories include:
-  - **RFD/outputs/**: RFdiffusion-generated designs.
-  - **MPNN/outputs/**: Sequences generated by ProteinMPNN.
-  - **AF/outputs/**: Structures and metrics generated by AlphaFold.
+## Configuration
 
----
+Edit `config.json` with your institution-specific paths. See `examples/example_config.json` for reference.
+
+### Pipeline Settings
+
+| Field | Description |
+|---|---|
+| `pipeline.base_dir` | Root directory for pipeline outputs |
+| `pipeline.input_pdb` | Path to your target PDB structure |
+| `pipeline.conda_env` | Conda environment name (default: `protein_design`) |
+| `pipeline.container_runtime` | `singularity` or `docker` |
+| `pipeline.cuda_module` | CUDA module to load (e.g., `CUDA/12.4`) |
+
+### SLURM Settings
+
+| Field | Description |
+|---|---|
+| `slurm.partition` | GPU partition name |
+| `slurm.gres` | GPU resource specification |
+| `slurm.mem` | Memory allocation |
+| `slurm.time` | Wall time limit |
+| `slurm.mail_user` | Email for job notifications |
+
+### RFDiffusion
+
+| Field | Description |
+|---|---|
+| `rfdiffusion.container_path` | Path to RFDiffusion `.sif` image |
+| `rfdiffusion.model_path` | Path to RFDiffusion model weights |
+| `rfdiffusion.num_designs` | Number of backbones to generate |
+| `rfdiffusion.contigs` | Contig specification for design |
+| `rfdiffusion.hotspots` | Hotspot residues for binding |
+
+### ProteinMPNN
+
+| Field | Description |
+|---|---|
+| `proteinmpnn.install_path` | Path to ProteinMPNN (use `./ProteinMPNN` for local) |
+| `proteinmpnn.num_sequences` | Sequences per backbone |
+| `proteinmpnn.designed_chain` | Chain ID being designed |
+| `proteinmpnn.target_chain` | Chain ID of the binding target |
+| `proteinmpnn.process_count` | Number of sequences to carry forward to AF3 |
+
+### AlphaFold 3
+
+| Field | Description |
+|---|---|
+| `alphafold3.container_path` | Path to AF3 `.sif` image |
+| `alphafold3.database_path` | Path to AF3 sequence databases |
+| `alphafold3.model_path` | Path to AF3 model parameters |
+| `alphafold3.programs_path` | Path to AF3 `run_alphafold.py` directory |
+| `alphafold3.num_seeds` | Model seeds per prediction |
+| `alphafold3.num_samples` | Diffusion samples per seed |
+| `alphafold3.use_templates` | Enable structural templates (`true`/`false`) |
+
+## Pipeline Stages
+
+### Stage 1: RFDiffusion
+
+Generates protein backbone structures using RFDiffusion in a Singularity container. The input PDB defines the target binding site, and contigs/hotspots control the design space.
+
+**Outputs:** `RFD/outputs/RFD_0.pdb`, `RFD_1.pdb`, ...
+
+### Stage 2: ProteinMPNN
+
+For each generated backbone, ProteinMPNN:
+1. Parses PDB chain coordinates
+2. Assigns designed vs. fixed chains
+3. Identifies fixed positions (consecutive non-glycine stretches)
+4. Designs sequences with specified diversity parameters
+
+**Outputs:** `MPNN/outputs/seqs/RFD_0.fa`, `RFD_1.fa`, ...
+
+### Stage 3: AF3 Input Generation
+
+Converts MPNN FASTA output to AlphaFold 3 input JSON. Each designed sequence becomes a separate AF3 job with configurable seeds and samples.
+
+**Outputs:** `AF3_INPUT/RFD_0/RFD_0_seq_1.json`, ...
+
+### Stage 4: AlphaFold 3
+
+Runs AF3 structure prediction for each designed sequence. Produces model structures (CIF), confidence metrics, and PAE matrices.
+
+**Outputs:** `AF3/RFD_0/rfd_0_seq_1/seed-N_sample-M/` containing `*_model.cif`, `*_summary_confidences.json`, `*_confidences.json`
+
+## Template Support
+
+To use structural templates with AlphaFold 3:
+
+1. Set `alphafold3.use_templates: true` in config
+2. Provide template CIF files in `alphafold3.template_cif_dir`
+3. The pipeline will align templates to query sequences and embed them in AF3 JSON
+
+For manual template addition:
+
+```bash
+python scripts/add_templates_to_af3.py \
+  --input_dir AF3_INPUT/ \
+  --output_dir AF3_INPUT/ \
+  --chain_template_map "A:/path/to/chain_a.cif,B:/path/to/chain_b.cif" \
+  --release_date 2024-01-01
+```
+
+## Analysis
+
+After the pipeline completes, run the analysis script:
+
+```bash
+python analysis/analysis.py \
+  --rf_base_dir /path/to/run/RFD/outputs \
+  --af_base_dir /path/to/run/AF3 \
+  --output_dir /path/to/run/analysis
+```
+
+### Metrics
+
+| Metric | Source | Description |
+|---|---|---|
+| **Ranking Score** | `summary_confidences.json` | AF3 overall confidence (higher = better) |
+| **pLDDT** | `confidences.json` | Per-atom predicted local distance difference test |
+| **pTM** | `summary_confidences.json` | Predicted template modeling score |
+| **ipTM** | `summary_confidences.json` | Interface predicted TM score |
+| **PAE** | `confidences.json` | Predicted aligned error matrix |
+| **Clash Score** | Computed from CIF | Steric clashes (atom pairs < 2A) |
+| **RMSD** | Computed vs. reference | Backbone RMSD with iterative outlier rejection |
+
+### Outputs
+
+- `plddt.tsv`, `ptm_iptm.tsv`, `pae.tsv`, `clash.tsv` — Individual metric tables
+- `final_merged.tsv` — All metrics merged
+- `top20_cifs/` — Top 20 model CIF files by ranking score
+- `analysis_report.pdf` — PDF report with tables and scatter plots
+
+## Output Structure
+
+Each pipeline run creates a timestamped directory:
+
+```
+{base_dir}/{timestamp}/
+├── config.json              # Copy of config used
+├── RFD/
+│   ├── inputs/              # Input PDB
+│   └── outputs/             # Generated backbones (*.pdb)
+├── MPNN/
+│   ├── inputs/              # RFD PDBs
+│   └── outputs/
+│       ├── parsed_pdbs.jsonl
+│       ├── assigned_pdbs.jsonl
+│       ├── fixed_pdbs.jsonl
+│       └── seqs/            # Designed sequences (*.fa)
+├── AF3_INPUT/
+│   └── RFD_N/               # AF3 JSON inputs per design
+└── AF3/
+    └── RFD_N/
+        └── rfd_n_seq_m/
+            └── seed-S_sample-T/
+                ├── *_model.cif
+                ├── *_summary_confidences.json
+                └── *_confidences.json
+```
+
+## Docker Support
+
+Set `pipeline.container_runtime` to `"docker"` in your config. The pipeline will use `docker run --gpus all` instead of `singularity run --nv`.
 
 ## Troubleshooting
 
-### Common Issues
-1. **FileNotFoundError**: Ensure paths in `config.json` are correct and accessible.
-2. **AlphaFold ValueError**:
-   - Check FASTA file formatting.
-   - Validate AlphaFold database paths.
-
-### Debugging
-Enable debug logs in the scripts:
-```bash
-set -x  # Enables verbose logging
-```
-## Analysis Script (`analysis.py`)
----
-### Python Libraries
-Install the Python dependencies using `conda`:
-
-```bash
-conda create -n protein_design_env python=3.9
-conda activate protein_design_env
-
-# Core Libraries
-conda install numpy pandas biopython scipy scikit-learn
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
-
-# RMSD & Structural Analysis
-conda install -c conda-forge mdanalysis
-conda install -c conda-forge mdtraj  # Optional but useful
-
-# Plotting and PDF Generation
-conda install -c plotly plotly
-conda install -c conda-forge reportlab
-
-# Others
-conda install -c conda-forge argparse
-```
-
----
-
-### Features
-- **pLDDT Extraction**: Reads scores from `ranking_debug.json`.
-- **RMSD Calculation**: Compares predictions to reference structures.
-- **pTM/ipTM & PAE Extraction**: Gathers AlphaFold metrics.
-- **Clash Count**: Calculates steric clashes.
-- **Top 20 Selection**: Based on pLDDT scores.
-
-### Outputs
-- **TSV Files**: Containing individual metrics for **pLDDT**, **RMSD**, **pTM/ipTM**, **PAE**, and **Clashes**.
-- **Final Merged TSV**: Combines all metrics for comprehensive analysis.
-- **Top 20 Folder**: Contains the top 20 PDB files ranked by pLDDT.
-- **PDF Report**: Includes scatter plots and summary tables.
-
-Run `analysis.py`-- make sure to specify file pathways in your bash: 
-
-```bash
-python analysis.py \
-  --rf_base_dir /path/to/reference_pdbs \
-  --af_base_dir /path/to/alphafold_outputs \
-  --output_dir /path/to/results/ \
-  --plddt_tsv plddt_results.tsv \
-  --rmsd_tsv rmsd_results.tsv \
-  --ptm_iptm_tsv ptm_iptm_results.tsv \
-  --pae_tsv pae_results.tsv \
-  --clash_tsv clash_results.tsv \
-  --final_merged_tsv final_merged_metrics.tsv \
-  --downselected_dir top20_by_plddt \
-  --pdf_name analysis_report.pdf
-```
----
-
-## Example Applications
-- **Flu A20 Loop Binders**: Design binders targeting specific Flu A20 epitopes.
-- **Vav1/GEFH1 Inhibitors**: Generate inhibitors for critical signaling pathways.
-- **COVID-19 Epitope Scaffolds**: Develop scaffolds for immune response studies.
-
----
-
-## Contributions
-Feel free to contribute improvements via pull requests or by opening issues in the repository. Feedback is welcome!
-
----
+| Issue | Solution |
+|---|---|
+| `jq: command not found` | `conda activate protein_design` or `conda install -c conda-forge jq` |
+| `singularity: command not found` | Load your HPC's singularity module or install Apptainer |
+| CUDA out of memory | Reduce `slurm.mem`, use a node with more VRAM, or reduce `num_designs` |
+| ProteinMPNN not found | Run `./setup.sh` or set `proteinmpnn.install_path` correctly |
+| AF3 template errors | Ensure `unpairedMsa` and `pairedMsa` are `""` (not null) when templates are set |
+| Empty AF3 outputs | Check that AF3 container, databases, and model paths exist |
 
 ## License
-This workflow is open-source and distributed under the MIT License.
 
----
+Apache License 2.0. See [LICENSE](LICENSE).
 
-## Acknowledgments
-This workflow was created in the Azoitei Lab, led by PI Mihai Azoitei, in collaboration with lab members Fabiola Vacca and Dan Marston at Duke University. We are grateful for their scientific input and ongoing support, which were instrumental in shaping and refining this pipeline.
+## Credits
 
-For additional questions or support, contact [hsb26@duke.edu](mailto:hsb26@duke.edu).
+- [RFDiffusion](https://github.com/RosettaCommons/RFdiffusion) — Watson et al.
+- [ProteinMPNN](https://github.com/dauparas/ProteinMPNN) — Dauparas et al.
+- [AlphaFold 3](https://github.com/google-deepmind/alphafold3) — Abramson et al.
