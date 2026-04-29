@@ -31,6 +31,103 @@ CONFIG_FILE="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")
 # Resolve repo root (directory containing this script)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── Pre-flight config validation ────────────────────────────────────────────
+# Runs before sbatch so users catch path errors immediately.
+echo "Validating configuration..."
+_jq_val() { jq -r "$1" "$CONFIG_FILE"; }
+
+VALIDATION_ERRORS=()
+
+# Check input PDB
+_input_pdb=$(_jq_val '.pipeline.input_pdb')
+if [[ ! -f "$_input_pdb" ]]; then
+    VALIDATION_ERRORS+=("pipeline.input_pdb: file not found: $_input_pdb")
+fi
+
+# Check container runtime
+_runtime=$(_jq_val '.pipeline.container_runtime')
+if [[ "$_runtime" == "singularity" ]]; then
+    if ! command -v singularity &>/dev/null && ! command -v apptainer &>/dev/null; then
+        VALIDATION_ERRORS+=("singularity/apptainer: not found in PATH (load your HPC module?)")
+    fi
+elif [[ "$_runtime" == "docker" ]]; then
+    if ! command -v docker &>/dev/null; then
+        VALIDATION_ERRORS+=("docker: not found in PATH")
+    fi
+else
+    VALIDATION_ERRORS+=("pipeline.container_runtime: must be 'singularity' or 'docker', got '$_runtime'")
+fi
+
+# Check RFDiffusion paths
+_rfd_sif=$(_jq_val '.rfdiffusion.container_path')
+if [[ ! -f "$_rfd_sif" ]]; then
+    VALIDATION_ERRORS+=("rfdiffusion.container_path: file not found: $_rfd_sif")
+fi
+_rfd_model=$(_jq_val '.rfdiffusion.model_path')
+if [[ ! -d "$_rfd_model" ]]; then
+    VALIDATION_ERRORS+=("rfdiffusion.model_path: directory not found: $_rfd_model")
+fi
+
+# Check ProteinMPNN
+_mpnn_path=$(_jq_val '.proteinmpnn.install_path')
+if [[ "$_mpnn_path" == ./* ]]; then
+    _mpnn_path="$REPO_ROOT/${_mpnn_path#./}"
+fi
+if [[ ! -f "$_mpnn_path/protein_mpnn_run.py" ]]; then
+    VALIDATION_ERRORS+=("proteinmpnn.install_path: protein_mpnn_run.py not found in $_mpnn_path (run setup.sh first?)")
+fi
+
+# Check AlphaFold 3 paths
+_af3_sif=$(_jq_val '.alphafold3.container_path')
+if [[ ! -f "$_af3_sif" ]]; then
+    VALIDATION_ERRORS+=("alphafold3.container_path: file not found: $_af3_sif")
+fi
+_af3_db=$(_jq_val '.alphafold3.database_path')
+if [[ ! -d "$_af3_db" ]]; then
+    VALIDATION_ERRORS+=("alphafold3.database_path: directory not found: $_af3_db")
+fi
+_af3_model=$(_jq_val '.alphafold3.model_path')
+if [[ ! -d "$_af3_model" ]]; then
+    VALIDATION_ERRORS+=("alphafold3.model_path: directory not found: $_af3_model")
+fi
+_af3_programs=$(_jq_val '.alphafold3.programs_path')
+if [[ ! -d "$_af3_programs" ]]; then
+    VALIDATION_ERRORS+=("alphafold3.programs_path: directory not found: $_af3_programs")
+fi
+
+# Check for placeholder paths (user forgot to edit config)
+for _val in "$_input_pdb" "$_rfd_sif" "$_rfd_model" "$_af3_sif" "$_af3_db" "$_af3_model" "$_af3_programs"; do
+    if [[ "$_val" == /path/to/* ]]; then
+        VALIDATION_ERRORS+=("config still contains placeholder paths (/path/to/...) — edit config.json first")
+        break
+    fi
+    if [[ "$_val" == *YOUR_NETID* ]]; then
+        VALIDATION_ERRORS+=("config still contains YOUR_NETID placeholder — run: sed -i \"s/YOUR_NETID/\$USER/g\" config.json")
+        break
+    fi
+done
+
+# Check base_dir is writable
+_base_dir=$(_jq_val '.pipeline.base_dir')
+if [[ "$_base_dir" == /path/to/* ]]; then
+    VALIDATION_ERRORS+=("pipeline.base_dir: still set to placeholder — edit config.json first")
+elif [[ ! -d "$_base_dir" ]]; then
+    mkdir -p "$_base_dir" 2>/dev/null || VALIDATION_ERRORS+=("pipeline.base_dir: cannot create directory: $_base_dir")
+fi
+
+if [[ ${#VALIDATION_ERRORS[@]} -gt 0 ]]; then
+    echo ""
+    echo "ERROR: Config validation failed with ${#VALIDATION_ERRORS[@]} error(s):"
+    for err in "${VALIDATION_ERRORS[@]}"; do
+        echo "  - $err"
+    done
+    echo ""
+    echo "Fix these in $CONFIG_FILE before running the pipeline."
+    exit 1
+fi
+echo "Configuration OK."
+echo ""
+
 # ── Auto-submit via sbatch if not already running under SLURM ────────────────
 if [[ -z "${SLURM_JOB_ID:-}" ]] && command -v sbatch &>/dev/null; then
     # Read SLURM settings from config

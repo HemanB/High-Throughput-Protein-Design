@@ -1,13 +1,13 @@
 {
   "pipeline": {
-    "base_dir": "/path/to/output/directory",
+    "base_dir": "/cwork/YOUR_NETID/protein_design_runs",
     "input_pdb": "/path/to/your/target.pdb",
     "conda_env": "protein_design",
     "container_runtime": "singularity",
     "cuda_module": "CUDA/12.4"
   },
   "slurm": {
-    "partition": "gpu-partition",
+    "partition": "dhvi-gpu",
     "gres": "gpu:1",
     "mem": "64G",
     "cpus_per_task": 8,
@@ -18,15 +18,15 @@
     "extra_sbatch_args": ""
   },
   "rfdiffusion": {
-    "container_path": "/path/to/rfdiffusion_v1.1.0.sif",
-    "model_path": "/path/to/RFdiffusion/models",
+    "container_path": "/hpc/group/dhvi/WieheLab/MMH/rfdiffusion/rfdiffusion_v1.1.0.sif",
+    "model_path": "/hpc/group/dhvi/WieheLab/RFdiffusion/models",
     "internal_pwd": "/app/RFdiffusion",
     "num_designs": 10,
     "contigs": "[B1-100/0 50-100]",
     "hotspots": "[B30,B50,B60]",
     "extra_args": "",
-    "tmp_dir": "/tmp/rfd_tmp",
-    "cache_dir": "/tmp/rfd_cache"
+    "tmp_dir": "/cwork/YOUR_NETID/scratch/rfd_tmp",
+    "cache_dir": "/cwork/YOUR_NETID/scratch/rfd_cache"
   },
   "proteinmpnn": {
     "install_path": "./ProteinMPNN",
@@ -41,15 +41,15 @@
     "process_count": 3
   },
   "alphafold3": {
-    "container_path": "/path/to/AF3_v3.0.1.sif",
-    "database_path": "/path/to/AF3_databases",
-    "model_path": "/path/to/AF3_models",
-    "programs_path": "/path/to/AF3_Programs/alphafold3",
+    "container_path": "/hpc/group/dhvi/WieheLab/MMH/alphafold_v3.0.1/alphafold3.0.1_111125_latest.sif",
+    "database_path": "/hpc/group/dhvi/WieheLab/AF3_dbs",
+    "model_path": "/hpc/group/dhvi/WieheLab/MMH/setup/AF3_models",
+    "programs_path": "/hpc/group/dhvi/WieheLab/MMH/setup/software/alphafold3",
     "num_seeds": 5,
     "num_samples": 5,
     "use_templates": false,
     "template_cif_dir": "",
     "template_release_date": "2024-01-01",
-    "tmp_dir": "/tmp/af3_tmp"
+    "tmp_dir": "/cwork/YOUR_NETID/scratch/af3_tmp"
   }
 }

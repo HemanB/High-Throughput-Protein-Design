@@ -2,6 +2,8 @@
 
 An automated pipeline for computational protein design integrating **RFDiffusion**, **ProteinMPNN**, and **AlphaFold 3**. Clone, configure, and run on any SLURM-managed HPC cluster.
 
+> **Duke DHVI users (dhvi-hpc branch):** Container images, model weights, and database paths are pre-configured for the Duke HPC cluster. You only need to set your NetID, input PDB, and design parameters (contigs/hotspots) in `config.json`.
+
 ## Overview
 
 This pipeline automates the full protein design workflow:
@@ -16,8 +18,8 @@ All configuration is centralized in a single JSON file. No hardcoded paths.
 ## Quick Start
 
 ```bash
-# 1. Clone
-git clone https://github.com/HemanB/High-Throughput-Protein-Design.git
+# 1. Clone (use the dhvi-hpc branch for Duke DHVI)
+git clone -b dhvi-hpc https://github.com/HemanB/High-Throughput-Protein-Design.git
 cd High-Throughput-Protein-Design
 
 # 2. Setup (creates conda env, clones ProteinMPNN)
@@ -26,13 +28,15 @@ cd High-Throughput-Protein-Design
 ./setup.sh --conda-prefix /cwork/$USER
 
 # 3. Configure
-#    Edit config.json with your paths (container images, databases, output dirs)
+#    Replace YOUR_NETID with your Duke NetID, set your input PDB,
+#    and adjust contigs/hotspots for your design target.
+sed -i "s/YOUR_NETID/$USER/g" config.json
 nano config.json
 
 # 4. Activate environment
 conda activate protein_design
 
-# 5. Run (auto-submits to SLURM using config.json settings)
+# 5. Run (validates config, then auto-submits to SLURM)
 ./pipeline.sh config.json
 ```
 
@@ -54,6 +58,7 @@ conda activate protein_design
 ```bash
 ./setup.sh --conda-prefix /cwork/$USER   # Full setup (env installed to /cwork)
 ./setup.sh --skip-conda                  # Skip conda env (already exists)
+./setup.sh --force --conda-prefix /cwork/$USER  # Recreate env without prompting
 ./setup.sh --mpnn-path /path/to/ProteinMPNN  # Use existing install
 ```
 
@@ -64,6 +69,8 @@ The setup script:
 - Clones ProteinMPNN (or links to an existing installation)
 - Creates `config.json` from the template
 - Validates your environment (container runtime, GPU, jq)
+
+> **Non-interactive mode:** If the conda environment already exists, `setup.sh` will skip recreation when run non-interactively (e.g., in a script). Use `--force` to explicitly recreate it without prompting.
 
 ### Manual Setup
 
@@ -239,6 +246,10 @@ Each pipeline run creates a timestamped directory:
 ## Docker Support
 
 Set `pipeline.container_runtime` to `"docker"` in your config. The pipeline will use `docker run --gpus all` instead of `singularity run --nv`.
+
+## Config Validation
+
+The pipeline validates all paths in `config.json` **before** submitting to SLURM. This catches typos, missing files, and placeholder paths immediately — rather than after waiting in the job queue. Checked paths include container images, model weights, databases, input PDB, and ProteinMPNN installation.
 
 ## Troubleshooting
 

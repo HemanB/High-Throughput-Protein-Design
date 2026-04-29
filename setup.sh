@@ -14,6 +14,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Defaults
 SKIP_CONDA=false
+FORCE=false
 MPNN_PATH=""
 CONDA_PREFIX_DIR=""
 
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-conda)
             SKIP_CONDA=true
+            shift
+            ;;
+        --force|-f)
+            FORCE=true
             shift
             ;;
         --mpnn-path)
@@ -39,6 +44,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --conda-prefix DIR        Install conda env and cache to DIR"
             echo "                            (recommended: your /cwork/<netid> directory)"
             echo "  --skip-conda              Skip conda environment creation"
+            echo "  --force, -f               Recreate conda env if it already exists (no prompt)"
             echo "  --mpnn-path PATH          Path to existing ProteinMPNN installation"
             echo "  -h, --help                Show this help message"
             echo ""
@@ -89,13 +95,22 @@ if [[ "$SKIP_CONDA" == "false" ]]; then
 
     # ── Create the environment ───────────────────────────────────────────
     if conda env list | grep -q "protein_design"; then
-        echo "  Environment 'protein_design' already exists."
-        read -p "  Recreate it? (y/N): " choice
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
+        if [[ "$FORCE" == "true" ]]; then
+            echo "  Environment 'protein_design' already exists. Recreating (--force)..."
             conda env remove -n protein_design -y
             conda env create -f "$REPO_ROOT/environment.yml"
+        elif [[ -t 0 ]]; then
+            echo "  Environment 'protein_design' already exists."
+            read -p "  Recreate it? (y/N): " choice
+            if [[ "$choice" =~ ^[Yy]$ ]]; then
+                conda env remove -n protein_design -y
+                conda env create -f "$REPO_ROOT/environment.yml"
+            else
+                echo "  Skipping environment creation."
+            fi
         else
-            echo "  Skipping environment creation."
+            echo "  Environment 'protein_design' already exists. Skipping."
+            echo "  (Use --force to recreate in non-interactive mode.)"
         fi
     else
         echo "  Creating environment (this may take several minutes)..."
