@@ -4,6 +4,7 @@
 #
 # Usage:
 #   ./setup.sh                          # Full setup (conda env + ProteinMPNN)
+#   ./setup.sh --conda-prefix /cwork/netid  # Install conda env to a specific dir
 #   ./setup.sh --skip-conda             # Skip conda env creation
 #   ./setup.sh --mpnn-path /path/to/ProteinMPNN  # Use existing install
 ###############################################################################
@@ -14,6 +15,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Defaults
 SKIP_CONDA=false
 MPNN_PATH=""
+CONDA_PREFIX_DIR=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -26,13 +28,23 @@ while [[ $# -gt 0 ]]; do
             MPNN_PATH="$2"
             shift 2
             ;;
+        --conda-prefix)
+            CONDA_PREFIX_DIR="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: ./setup.sh [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --conda-prefix DIR        Install conda env and cache to DIR"
+            echo "                            (recommended: your /cwork/<netid> directory)"
             echo "  --skip-conda              Skip conda environment creation"
             echo "  --mpnn-path PATH          Path to existing ProteinMPNN installation"
             echo "  -h, --help                Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  ./setup.sh --conda-prefix /cwork/\$USER"
+            echo "  ./setup.sh --skip-conda --mpnn-path /path/to/ProteinMPNN"
             exit 0
             ;;
         *)
@@ -51,13 +63,31 @@ echo ""
 if [[ "$SKIP_CONDA" == "false" ]]; then
     echo "Step 1: Creating conda environment..."
 
+    # Find conda — try the function first, then common module, then PATH
     if ! command -v conda &>/dev/null; then
-        echo "Error: conda not found. Install Miniconda/Anaconda first."
+        # Try loading the Anaconda module (Duke HPC)
+        if command -v module &>/dev/null; then
+            module load Anaconda3 2>/dev/null || true
+        fi
+    fi
+    if ! command -v conda &>/dev/null; then
+        echo "Error: conda not found. Load your Anaconda module or install Miniconda first."
+        echo "  On Duke HPC: module load Anaconda3/2024.02"
         exit 1
     fi
 
     eval "$(conda shell.bash hook)"
 
+    # ── Redirect conda dirs if --conda-prefix is set ─────────────────────
+    if [[ -n "$CONDA_PREFIX_DIR" ]]; then
+        mkdir -p "$CONDA_PREFIX_DIR/.conda/pkgs" "$CONDA_PREFIX_DIR/.conda/envs"
+        conda config --add pkgs_dirs "$CONDA_PREFIX_DIR/.conda/pkgs"
+        conda config --add envs_dirs "$CONDA_PREFIX_DIR/.conda/envs"
+        echo "  Conda packages: $CONDA_PREFIX_DIR/.conda/pkgs"
+        echo "  Conda envs:     $CONDA_PREFIX_DIR/.conda/envs"
+    fi
+
+    # ── Create the environment ───────────────────────────────────────────
     if conda env list | grep -q "protein_design"; then
         echo "  Environment 'protein_design' already exists."
         read -p "  Recreate it? (y/N): " choice
@@ -68,6 +98,7 @@ if [[ "$SKIP_CONDA" == "false" ]]; then
             echo "  Skipping environment creation."
         fi
     else
+        echo "  Creating environment (this may take several minutes)..."
         conda env create -f "$REPO_ROOT/environment.yml"
     fi
     echo "  Conda environment ready."
@@ -133,7 +164,7 @@ fi
 if command -v jq &>/dev/null; then
     echo "  jq: $(jq --version)"
 else
-    echo "  WARNING: jq not found. Install it or it will be available via conda env."
+    echo "  WARNING: jq not found. It will be available after: conda activate protein_design"
 fi
 
 # Check GPU
@@ -158,7 +189,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Edit config.json with your institution-specific paths"
 echo "  2. Activate the environment:  conda activate protein_design"
-echo "  3. Run the pipeline:          sbatch pipeline.sh config.json"
+echo "  3. Run the pipeline:          ./pipeline.sh config.json"
 echo ""
 echo "See README.md for detailed configuration instructions."
 echo "See examples/example_config.json for a reference configuration."

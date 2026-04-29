@@ -21,7 +21,9 @@ git clone https://github.com/HemanB/High-Throughput-Protein-Design.git
 cd High-Throughput-Protein-Design
 
 # 2. Setup (creates conda env, clones ProteinMPNN)
-./setup.sh
+#    Requires ~8GB for the conda env (PyTorch + CUDA).
+#    Use --conda-prefix to install to a directory with enough space.
+./setup.sh --conda-prefix /cwork/$USER
 
 # 3. Configure
 #    Edit config.json with your paths (container images, databases, output dirs)
@@ -50,10 +52,12 @@ conda activate protein_design
 ### Automated Setup
 
 ```bash
-./setup.sh                          # Full setup
-./setup.sh --skip-conda             # Skip conda env (already exists)
+./setup.sh --conda-prefix /cwork/$USER   # Full setup (env installed to /cwork)
+./setup.sh --skip-conda                  # Skip conda env (already exists)
 ./setup.sh --mpnn-path /path/to/ProteinMPNN  # Use existing install
 ```
+
+> **Storage:** The conda environment requires ~8GB (PyTorch + CUDA). Use `--conda-prefix` to point to a directory with sufficient space. Without it, the environment installs to `~/.conda/envs/` which may exceed home directory quotas on HPC systems.
 
 The setup script:
 - Creates a conda environment from `environment.yml`
