@@ -11,39 +11,30 @@ def main():
 
     args = parser.parse_args()
 
-    chain_list = args.chain_list.strip().split()
-    if not chain_list:
+    designed_chain_list = args.chain_list.strip().split()
+    if not designed_chain_list:
         print("No chains provided in --chain_list.", file=sys.stderr)
         sys.exit(1)
 
-    # In this example, we assume all chains provided in chain_list are "designed"
-    # and no chains are considered fixed. If you need a different logic, adjust below.
-    designed_chains = chain_list
-    fixed_chains = []  # Adjust if necessary
-
-    with open(args.input_path, 'r') as infile, open(args.output_path, 'w') as outfile:
+    my_dict = {}
+    with open(args.input_path, 'r') as infile:
         for line in infile:
             line = line.strip()
             if not line:
                 continue
             data = json.loads(line)
+            pdb_name = data['name']
 
-            # Add or update chain_id_dict field
-            # The expected format for ProteinMPNN (check documentation if different):
-            # {"fixed": [...], "designed": [...]}
-            chain_id_dict = {
-                "fixed": fixed_chains,
-                "designed": designed_chains
-            }
+            all_chain_list = [item[-1:] for item in list(data) if item[:9] == 'seq_chain']
+            fixed_chain_list = [c for c in all_chain_list if c not in designed_chain_list]
 
-            # Merge this into the data
-            data["chain_id_dict"] = chain_id_dict
+            my_dict[pdb_name] = [designed_chain_list, fixed_chain_list]
 
-            outfile.write(json.dumps(data) + "\n")
+    with open(args.output_path, 'w') as outfile:
+        outfile.write(json.dumps(my_dict) + "\n")
 
     print("Assigned designed and fixed chains. Output written to:", args.output_path)
 
 
 if __name__ == "__main__":
     main()
-

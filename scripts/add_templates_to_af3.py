@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import json
+import sys
 import numpy as np
 from pathlib import Path
 
@@ -385,8 +386,6 @@ def main():
         print("Error: Provide either --input_json or --input_dir", file=sys.stderr)
         sys.exit(1)
 
-
-import sys
 
 if __name__ == "__main__":
     main()

@@ -9,21 +9,69 @@
 #   4. AlphaFold 3   - Predict structures of designed sequences
 #
 # Usage:
-#   sbatch pipeline.sh /path/to/config.json
-#   bash pipeline.sh /path/to/config.json   # for testing (non-SLURM)
+#   ./pipeline.sh /path/to/config.json          # submits via sbatch
+#   bash pipeline.sh /path/to/config.json       # for testing (non-SLURM)
+#
+# When invoked directly (not under SLURM), the script generates SBATCH
+# headers from config.json and re-submits itself via sbatch.
 ###############################################################################
 set -euo pipefail
 
 # ── Parse config ─────────────────────────────────────────────────────────────
 CONFIG_FILE="${1:-}"
 if [[ -z "$CONFIG_FILE" || ! -f "$CONFIG_FILE" ]]; then
-    echo "Usage: sbatch pipeline.sh /path/to/config.json"
+    echo "Usage: ./pipeline.sh /path/to/config.json"
     echo "Error: Configuration file not found: $CONFIG_FILE"
     exit 1
 fi
 
+# Resolve to absolute path so it works after sbatch re-submit
+CONFIG_FILE="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")"
+
 # Resolve repo root (directory containing this script)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Auto-submit via sbatch if not already running under SLURM ────────────────
+if [[ -z "${SLURM_JOB_ID:-}" ]] && command -v sbatch &>/dev/null; then
+    # Read SLURM settings from config
+    _jq() { jq -r "$1" "$CONFIG_FILE"; }
+    SLURM_PARTITION=$(_jq '.slurm.partition')
+    SLURM_GRES=$(_jq '.slurm.gres')
+    SLURM_MEM=$(_jq '.slurm.mem')
+    SLURM_CPUS=$(_jq '.slurm.cpus_per_task')
+    SLURM_TIME=$(_jq '.slurm.time')
+    SLURM_MAIL_USER=$(_jq '.slurm.mail_user')
+    SLURM_MAIL_TYPE=$(_jq '.slurm.mail_type')
+    SLURM_EXCLUSIVE=$(_jq '.slurm.exclusive')
+    SLURM_EXTRA=$(_jq '.slurm.extra_sbatch_args')
+
+    SBATCH_ARGS=(
+        --job-name="protein_design"
+        --partition="$SLURM_PARTITION"
+        --gres="$SLURM_GRES"
+        --mem="$SLURM_MEM"
+        --cpus-per-task="$SLURM_CPUS"
+        --time="$SLURM_TIME"
+        --output="protein_design_%j.out"
+        --error="protein_design_%j.err"
+    )
+
+    if [[ -n "$SLURM_MAIL_USER" && "$SLURM_MAIL_USER" != "null" ]]; then
+        SBATCH_ARGS+=(--mail-user="$SLURM_MAIL_USER" --mail-type="$SLURM_MAIL_TYPE")
+    fi
+    if [[ "$SLURM_EXCLUSIVE" == "true" ]]; then
+        SBATCH_ARGS+=(--exclusive)
+    fi
+    if [[ -n "$SLURM_EXTRA" && "$SLURM_EXTRA" != "null" ]]; then
+        read -ra EXTRA_ARGS <<< "$SLURM_EXTRA"
+        SBATCH_ARGS+=("${EXTRA_ARGS[@]}")
+    fi
+
+    echo "Submitting pipeline to SLURM..."
+    echo "  sbatch ${SBATCH_ARGS[*]} $REPO_ROOT/pipeline.sh $CONFIG_FILE"
+    sbatch "${SBATCH_ARGS[@]}" "$REPO_ROOT/pipeline.sh" "$CONFIG_FILE"
+    exit 0
+fi
 
 # ── Read config values ───────────────────────────────────────────────────────
 jq_get() { jq -r "$1" "$CONFIG_FILE"; }
@@ -103,13 +151,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-check_error() {
-    if [[ $? -ne 0 ]]; then
-        echo "Error in step: $1"
-        exit 1
-    fi
-}
-
 # ── Initialize environment ───────────────────────────────────────────────────
 echo "============================================================"
 echo "High-Throughput Protein Design Pipeline"
@@ -173,8 +214,11 @@ echo "STAGE 1: RFDiffusion"
 echo "============================================================"
 
 container_run \
-    --env TF_FORCE_UNIFIED_MEMORY=1,XLA_PYTHON_CLIENT_MEM_FRACTION=4.0,OPENMM_CPU_THREADS=10,HYDRA_FULL_ERROR=1 \
-    -B "$RFD_OUTPUT_DIR:/outputs,$RFD_INPUT_DIR:/inputs,$RFD_MODEL_PATH:/models,$RFD_SIF:/sif" \
+    --env TF_FORCE_UNIFIED_MEMORY=1 \
+    --env XLA_PYTHON_CLIENT_MEM_FRACTION=4.0 \
+    --env OPENMM_CPU_THREADS=10 \
+    --env HYDRA_FULL_ERROR=1 \
+    -B "$RFD_OUTPUT_DIR:/outputs,$RFD_INPUT_DIR:/inputs,$RFD_MODEL_PATH:/models" \
     --pwd "$RFD_PWD" \
     "$RFD_SIF" \
     hydra.run.dir=/outputs \
@@ -186,7 +230,7 @@ container_run \
     "contigmap.contigs=$RFD_CONTIGS" \
     "ppi.hotspot_res=$RFD_HOTSPOTS" \
     $RFD_EXTRA_ARGS
-check_error "RFDiffusion"
+
 
 echo "RFDiffusion completed. Outputs in $RFD_OUTPUT_DIR"
 
@@ -201,6 +245,35 @@ echo "============================================================"
 echo "STAGE 2: ProteinMPNN"
 echo "============================================================"
 
+find_consecutive_sequences() {
+    local arr=("$@")
+    if [[ ${#arr[@]} -eq 0 ]]; then
+        echo ""
+        return
+    fi
+    local start=${arr[0]}
+    local end=$start
+    local seq=($start)
+    local result=()
+    for val in "${arr[@]:1}"; do
+        if (( val == end + 1 )); then
+            end=$val
+            seq+=($val)
+        else
+            if (( ${#seq[@]} >= 5 )); then
+                result+=("${seq[@]}")
+            fi
+            start=$val
+            end=$val
+            seq=($val)
+        fi
+    done
+    if (( ${#seq[@]} >= 5 )); then
+        result+=("${seq[@]}")
+    fi
+    echo "${result[@]}"
+}
+
 for i in $(seq 0 $((RFD_NUM_DESIGNS - 1))); do
     input_pdb="$MPNN_INPUT_DIR/RFD_${i}.pdb"
     if [[ ! -f "$input_pdb" ]]; then
@@ -208,68 +281,50 @@ for i in $(seq 0 $((RFD_NUM_DESIGNS - 1))); do
         continue
     fi
 
-    rfd_output_num=$(basename "$input_pdb" .pdb | sed 's/RFD_//')
+    pdb_name="RFD_${i}"
+    echo "Running ProteinMPNN for ${pdb_name}..."
+
+    # Create per-PDB working directory so parse_multiple_chains processes only this PDB
+    pdb_work_dir="$MPNN_OUTPUT_DIR/${pdb_name}"
+    pdb_input_dir="$pdb_work_dir/input"
+    mkdir -p "$pdb_input_dir"
+    cp "$input_pdb" "$pdb_input_dir/"
+
+    parsed_chains="$pdb_work_dir/parsed_pdbs.jsonl"
+    assigned_chains="$pdb_work_dir/assigned_pdbs.jsonl"
+    fixed_positions="$pdb_work_dir/fixed_pdbs.jsonl"
 
     # Find non-glycine residues on the designed chain for fixed positions
     non_gly_residues=$(awk -v chain="$MPNN_DESIGNED_CHAIN" \
-        '$5 == chain && $4 != "GLY" {print $6}' "$input_pdb" | sort -u -n)
+        '$1 == "ATOM" && $5 == chain && $4 != "GLY" {print $6}' "$input_pdb" | sort -u -n)
     unique_non_gly_residues=($(echo "${non_gly_residues[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
-
-    find_consecutive_sequences() {
-        local arr=("$@")
-        local start=${arr[0]}
-        local end=$start
-        local seq=($start)
-        local result=()
-        for val in "${arr[@]:1}"; do
-            if (( val == end + 1 )); then
-                end=$val
-                seq+=($val)
-            else
-                if (( ${#seq[@]} >= 5 )); then
-                    result+=("${seq[@]}")
-                fi
-                start=$val
-                end=$val
-                seq=($val)
-            fi
-        done
-        if (( ${#seq[@]} >= 5 )); then
-            result+=("${seq[@]}")
-        fi
-        echo "${result[@]}"
-    }
 
     consecutive_non_gly_residues=$(find_consecutive_sequences "${unique_non_gly_residues[@]}")
     first_residue_target=$(awk -v chain="$MPNN_TARGET_CHAIN" \
-        '$5 == chain {print $6}' "$input_pdb" | sort -n | head -n 1)
+        '$1 == "ATOM" && $5 == chain {print $6}' "$input_pdb" | sort -n | head -n 1)
     chain_residues=$(awk -v chain="$MPNN_TARGET_CHAIN" -v first="$first_residue_target" \
-        '$5 == chain {print $6 - first + 1}' "$input_pdb" | sort -u -n | tr '\n' ' ' | sed 's/ $//')
+        '$1 == "ATOM" && $5 == chain {print $6 - first + 1}' "$input_pdb" | sort -u -n | tr '\n' ' ' | sed 's/ $//')
     fixed_positions_list="${consecutive_non_gly_residues}, ${chain_residues}"
 
-    echo "Running ProteinMPNN for RFD_${i}..."
-    parsed_chains="$MPNN_OUTPUT_DIR/parsed_pdbs.jsonl"
-    assigned_chains="$MPNN_OUTPUT_DIR/assigned_pdbs.jsonl"
-    fixed_positions="$MPNN_OUTPUT_DIR/fixed_pdbs.jsonl"
-
+    # Step 1: Parse chain coordinates from this single PDB
     python "$REPO_ROOT/scripts/parse_multiple_chains.py" \
-        --input_path="$MPNN_INPUT_DIR" \
+        --input_path="$pdb_input_dir" \
         --output_path="$parsed_chains"
-    check_error "parse_multiple_chains"
 
+    # Step 2: Assign designed vs fixed chains
     python "$REPO_ROOT/scripts/assign_fixed_chains.py" \
         --input_path="$parsed_chains" \
         --output_path="$assigned_chains" \
         --chain_list "$MPNN_CHAINS_TO_DESIGN"
-    check_error "assign_fixed_chains"
 
+    # Step 3: Build fixed positions dict
     python "$REPO_ROOT/scripts/make_fixed_positions_dict.py" \
         --input_path="$parsed_chains" \
         --output_path="$fixed_positions" \
         --chain_list "$MPNN_CHAINS_TO_DESIGN" \
         --position_list "$fixed_positions_list"
-    check_error "make_fixed_positions_dict"
 
+    # Step 4: Run ProteinMPNN on this single PDB
     python "$MPNN_SCRIPT" \
         --jsonl_path "$parsed_chains" \
         --chain_id_jsonl "$assigned_chains" \
@@ -280,7 +335,7 @@ for i in $(seq 0 $((RFD_NUM_DESIGNS - 1))); do
         --sampling_temp "$MPNN_SAMPLING_TEMP" \
         --seed "$MPNN_SEED" \
         --batch_size "$MPNN_BATCH_SIZE"
-    check_error "ProteinMPNN"
+
 done
 
 echo "ProteinMPNN completed. Outputs in $MPNN_OUTPUT_DIR"
@@ -308,7 +363,7 @@ python "$REPO_ROOT/scripts/generate_af3_inputs.py" \
     --target_chain_id "$MPNN_TARGET_CHAIN" \
     --process_count "$MPNN_PROCESS_COUNT" \
     --config "$CONFIG_FILE"
-check_error "generate_af3_inputs"
+
 
 # Optionally add templates
 if [[ "$AF3_USE_TEMPLATES" == "true" && -n "$AF3_TEMPLATE_CIF_DIR" ]]; then
@@ -318,7 +373,7 @@ if [[ "$AF3_USE_TEMPLATES" == "true" && -n "$AF3_TEMPLATE_CIF_DIR" ]]; then
         --output_dir "$AF3_INPUT_DIR" \
         --chain_template_map "$AF3_TEMPLATE_CIF_DIR" \
         --release_date "$AF3_TEMPLATE_DATE"
-    check_error "add_templates_to_af3"
+
 fi
 
 echo "AF3 input generation completed. Inputs in $AF3_INPUT_DIR"
@@ -363,7 +418,7 @@ for json_file in $af3_json_files; do
             --model_dir=/root/models \
             --db_dir=/root/public_databases \
             --output_dir=/root/af_output
-    check_error "AlphaFold 3: $json_basename"
+
 
     echo "  Completed: $rfd_subdir/$json_basename"
 done

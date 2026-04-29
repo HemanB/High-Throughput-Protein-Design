@@ -30,8 +30,8 @@ nano config.json
 # 4. Activate environment
 conda activate protein_design
 
-# 5. Run
-sbatch pipeline.sh config.json
+# 5. Run (auto-submits to SLURM using config.json settings)
+./pipeline.sh config.json
 ```
 
 ## Prerequisites
